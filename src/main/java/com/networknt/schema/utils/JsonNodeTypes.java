@@ -1,5 +1,7 @@
 package com.networknt.schema.utils;
 
+import java.util.Iterator;
+
 import tools.jackson.databind.JsonNode;
 import com.networknt.schema.ExecutionContext;
 import com.networknt.schema.Schema;
@@ -36,12 +38,9 @@ public class JsonNodeTypes {
             }
 
             if (nodeType == JsonType.NULL) {
-                if (parentSchema != null && schemaContext.isNullableKeywordEnabled()) {
-                    Schema grandParentSchema = parentSchema.getParentSchema();
-                    if (grandParentSchema != null && JsonNodeTypes.isNodeNullable(grandParentSchema.getSchemaNode())
-                            || JsonNodeTypes.isNodeNullable(parentSchema.getSchemaNode())) {
-                        return true;
-                    }
+                if (parentSchema != null && schemaContext.isNullableKeywordEnabled()
+                        && isNullableAncestor(parentSchema, executionContext)) {
+                    return true;
                 }
             }
 
@@ -73,6 +72,73 @@ public class JsonNodeTypes {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Determines if the schema owning the failing {@code type} keyword is
+     * nullable, either directly, via its lexical parent, or via a schema that
+     * referenced it through {@code $ref}.
+     * <p>
+     * A schema resolved through {@code $ref} is cached and shared across every
+     * site that references it, so its lexical parent (obtained through
+     * {@link Schema#getParentSchema()}) reflects where it is declared in the
+     * document rather than where it was referenced from. To find a
+     * {@code nullable: true} declared on the referencing schema (for example a
+     * property composed using {@code allOf} containing only a {@code $ref}),
+     * this walks up the dynamic evaluation stack instead, following through any
+     * chain of {@code $ref} schemas.
+     * <p>
+     * A schema found this way is itself a Reference Object (its node contains
+     * {@code $ref}), and per the OpenAPI 3.0 specification any sibling
+     * properties on a Reference Object, including {@code nullable}, must be
+     * ignored. So its own node is never consulted for {@code nullable} — only
+     * its lexical parent, which is the schema actually composing it (for
+     * example the {@code allOf}-owning schema).
+     *
+     * @param schema the schema owning the {@code type} keyword
+     * @param executionContext the execution context
+     * @return true if a nullable schema is found
+     */
+    private static boolean isNullableAncestor(Schema schema, ExecutionContext executionContext) {
+        Schema current = schema;
+        boolean isRefSchema = false;
+        while (current != null) {
+            if (!isRefSchema && isNodeNullable(current.getSchemaNode())) {
+                return true;
+            }
+            Schema parentSchema = current.getParentSchema();
+            if (parentSchema != null && isNodeNullable(parentSchema.getSchemaNode())) {
+                return true;
+            }
+            current = findReferencingSchema(current, executionContext);
+            isRefSchema = true;
+        }
+        return false;
+    }
+
+    /**
+     * Finds the schema that referenced the given schema through {@code $ref}, if
+     * any, by looking at the schema evaluated immediately before it on the
+     * dynamic evaluation stack.
+     *
+     * @param schema the schema that may have been reached through {@code $ref}
+     * @param executionContext the execution context
+     * @return the referencing schema, or null if none is found
+     */
+    private static Schema findReferencingSchema(Schema schema, ExecutionContext executionContext) {
+        Iterator<Schema> ancestors = executionContext.getEvaluationSchema().descendingIterator();
+        while (ancestors.hasNext()) {
+            if (ancestors.next() == schema) {
+                if (ancestors.hasNext()) {
+                    Schema candidate = ancestors.next();
+                    if (candidate.getSchemaNode().get(REF) != null) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        }
+        return null;
     }
 
     private static long detectVersion(SchemaContext schemaContext) {
